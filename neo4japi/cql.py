@@ -51,24 +51,28 @@ class _CQL(object):
     @property
     def cql(self):
         parsed_params = {}
+        cql_params = {}
         for k, v in self._params.items():
             parser = getattr(self, 'parse_' + k, None)
             if parser:
-                parsed_params[k] = parser()
+                parsed = parser()
+                parsed_params[k] = parsed['cql']
+                cql_params.update(parsed['params'])
             else:
                 parsed_params[k] = v
-        return self._cql_tmpl.format(**parsed_params).strip()
+        return {'cql': self._cql_tmpl.format(**parsed_params).strip(), 'params': cql_params}
 
     def parse_labels(self):
         if isinstance(self, Relation):
-            return parse_labels(self._params.get('labels', []), '|')
-        return parse_labels(self._params.get('labels', []))
+            return {'cql': parse_labels(self._params.get('labels', []), '|'), 'params': {}}
+        return {'cql': parse_labels(self._params.get('labels', [])), 'params': {}}
 
     def parse_pre_cql(self):
         pre_cql = self._params.get('pre_cql', '')
         if pre_cql:
-            pre_cql = pre_cql.cql
-        return pre_cql
+            return pre_cql.cql
+        else:
+            return {'cql': '', 'params': {}}
 
 
 class Relation(_CQL):
@@ -86,10 +90,12 @@ class Relation(_CQL):
         self.properties = kwargs
 
     def parse_properties(self):
-        parsed_properties = parse_properties(self._params.get('properties', {})) or ''
-        if parsed_properties:
-            parsed_properties = '{' + parsed_properties + '}'
-        return parsed_properties
+        parsed_properties = parse_properties(self._params.get('properties', {}))
+        parsed = {'cql': '', 'params': {}}
+        if parsed_properties['properties']:
+            parsed['cql'] = '{' + parsed_properties['properties'] + '}'
+            parsed['params'] = parsed_properties['params']
+        return parsed
 
     def parse_depth(self):
         depth = self._params.get('depth', '')
@@ -97,15 +103,16 @@ class Relation(_CQL):
             min_depth, max_depth = depth
             depth = '*'
             if min_depth < 0 and max_depth < 0:
-                return depth
+                pass
             elif min_depth < 0:
-                return depth + '..' + str(max_depth)
+                depth = depth + '..' + str(max_depth)
             elif max_depth < 0:
-                return depth + str(min_depth) + '..'
+                depth = depth + str(min_depth) + '..'
             else:
-                return depth + str(min_depth) + '..' + str(max_depth)
+                depth = depth + str(min_depth) + '..' + str(max_depth)
         else:
-            return depth
+            pass
+        return {'cql': depth, 'params': {}}
 
 
 class Node(_CQL):
@@ -122,21 +129,39 @@ class Node(_CQL):
         self.properties = kwargs
 
     def parse_properties(self):
-        parsed_properties = parse_properties(self._params.get('properties', {})) or ''
-        if parsed_properties:
-            parsed_properties = '{' + parsed_properties + '}'
-        return parsed_properties
+        parsed_properties = parse_properties(self._params.get('properties', {}))
+        parsed = {'cql': '', 'params': {}}
+        if parsed_properties['properties']:
+            parsed['cql'] = '{' + parsed_properties['properties'] + '}'
+            parsed['params'] = parsed_properties['params']
+        return parsed
+
+    def parse_post_cql(self):
+        parsed = {'cql': '', 'params': {}}
+        if self.post_cql:
+            rel_direc = self.post_cql[1]
+            rel_cql = self.post_cql[0].cql
+            node_cql = self.post_cql[2].cql
+            parsed['params'].update(rel_cql['params'])
+            parsed['params'].update(node_cql['params'])
+            if rel_direc == '-':
+                parsed['cql'] = '-' + rel_cql['cql'] + '-' + node_cql['cql']
+            elif rel_direc == '->':
+                parsed['cql'] = '-' + rel_cql['cql'] + '->' + node_cql['cql']
+            else:
+                parsed['cql'] = '<-' + rel_cql['cql'] + '-' + node_cql['cql']
+        return parsed
 
     def relationship(self, relationship: Relation, target_node):
-        self.post_cql = '-' + relationship.cql + '- ' + target_node.cql
+        self.post_cql = (relationship, '-', target_node)
         return self
 
     def relationship_to(self, relationship: Relation, target_node):
-        self.post_cql = '-' + relationship.cql + '-> ' + target_node.cql
+        self.post_cql = (relationship, '->', target_node)
         return self
 
     def relationship_from(self, relationship: Relation, target_node):
-        self.post_cql = '<-' + relationship.cql + '- ' + target_node.cql
+        self.post_cql = (relationship, '<-', target_node)
         return self
 
 
@@ -155,30 +180,36 @@ class Match(_CQL):
     def parse_nodes(self):
         nodes = self._params.get('nodes', [])
         parsed_nodes = []
+        params = {}
         for node in nodes:
-            parsed_nodes.append(node.cql)
-        return ', '.join(parsed_nodes)
+            parsed = node.cql
+            parsed_nodes.append(parsed['cql'])
+            params.update(parsed['params'])
+        return {'cql': ', '.join(parsed_nodes), 'params': params}
 
     def parse_filters(self):
         filters = self._params.get('filters', {})
         if filters:
-            return 'WHERE ' + parse_terms(filters)
-        else:
-            return ''
+            parsed = parse_terms(filters)
+            if parsed['filters']:
+                return {'cql': 'WHERE ' + parsed['filters'], 'params': parsed['params']}
+        return {'cql': '', 'params': {}}
 
     def parse_update(self):
         update = self._params.get('update', {})
         if update:
-            return 'SET ' + parse_properties(update, '=')
-        else:
-            return ''
+            parsed = parse_properties(update, '=')
+            if parsed['properties']:
+                return {'cql': 'SET ' + parsed['properties'], 'params': parsed['params']}
+        return {'cql': '', 'params': {}}
 
     def Match(self, *nodes, **kwargs):
         return Match(pre_cql=self, *nodes, **kwargs)
 
     def Return(self, fields: Union[List[str], str], distinct: bool = False, order_by: List = None, skip: int = None,
-               limit: int = None):
-        return Return(fields=fields, distinct=distinct, order_by=order_by, skip=skip, limit=limit, pre_cql=self)
+               limit: int = None, count: bool = False):
+        return Return(fields=fields, distinct=distinct, order_by=order_by, skip=skip, limit=limit, count=count,
+                      pre_cql=self)
 
     def Create(self, *nodes: List[Node]):
         return Create(*nodes, pre_cql=self)
@@ -210,29 +241,38 @@ class Match(_CQL):
 
 
 class Return(_CQL):
-    _params_set = {'pre_cql', 'distinct', 'fields', 'order_by', 'skip', 'limit', 'post_cql'}
+    _params_set = {'pre_cql', 'count', 'distinct', 'fields', 'order_by', 'skip', 'limit', 'post_cql'}
 
     def __init__(self, fields: Union[List[str], str], distinct: bool = False, order_by: List = None, skip: int = None,
-                 limit: int = None, **kwargs):
+                 limit: int = None, count: bool = False, **kwargs):
         super(Return, self).__init__(**kwargs)
-        self._cql_tmpl = u'{pre_cql} RETURN {distinct} {fields} {order_by} {skip} {limit} {post_cql}'
-        if not kwargs:
+        self._cql_tmpl = u'{pre_cql} RETURN {count} {distinct} {fields} {order_by} {skip} {limit} {post_cql}'
+        if not fields:
             raise Exception(u'ERROR: fields of RETURN statement cannot be empty')
-        self.distinct = 'DISTINCT' if distinct else ''
-        if not isinstance(fields, (List, Tuple)):
-            fields = [fields]
-        self.fields = fields
-        self.order_by = order_by or ''
-        self.skip = 'SKIP {}'.format(int(skip)) if skip else ''
-        self.limit = 'SKIP {}'.format(int(limit)) if limit else ''
+        if count:
+            self.count = 'COUNT({distinct} {fields}) as cnt'.format(distinct='DISTINCT' if distinct else '', fields=fields)
+            self.distinct = ''
+            self.fields = []
+            self.order_by = []
+            self.skip = ''
+            self.limit = ''
+        else:
+            self.count = ''
+            self.distinct = 'DISTINCT' if distinct else ''
+            if not isinstance(fields, (List, Tuple)):
+                fields = [fields]
+            self.fields = fields
+            self.order_by = order_by or []
+            self.skip = 'SKIP {}'.format(int(skip)) if skip else ''
+            self.limit = 'LIMIT {}'.format(int(limit)) if limit else ''
 
     def parse_fields(self):
         fields = self._params.get('fields', [])
-        return parse_fields(fields)
+        return {'cql': parse_fields(fields), 'params': {}}
 
     def parse_order_by(self):
         order_by = self._params.get('order_by', [])
-        return parse_order_by(order_by) or ''
+        return {'cql': parse_order_by(order_by) or '', 'params': {}}
 
 
 class Merge(_CQL):
@@ -243,12 +283,25 @@ class Merge(_CQL):
         self._cql_tmpl = u'{pre_cql} MERGE {node} {post_cql}'
         if not node:
             raise Exception(u'ERROR: properties of MERGE statement cannot be empty')
-        self.node = node.cql
+        self.node = node
+
+    def parse_node(self):
+        if self.node:
+            return self.node.cql
+        else:
+            return {'cql': '', 'params': {}}
+
+    def parse_post_cql(self):
+        if self.post_cql:
+            parsed = parse_properties(self.post_cql, '=')
+            if parsed['properties']:
+                return {'cql': 'SET ' + parsed['properties'], 'params': parsed['params']}
+        return {'cql': '', 'params': {}}
 
     def Set(self, **new_properties):
         if self.post_cql:
             raise Exception('ERROR: cannot SET MERGE statement twice')
-        self.post_cql = 'SET ' + parse_properties(new_properties, '=')
+        self.post_cql = new_properties
         return self
 
     def Merge(self, node: Node):
@@ -258,8 +311,9 @@ class Merge(_CQL):
         return Create(*nodes, pre_cql=self)
 
     def Return(self, fields: Union[List[str], str], distinct: bool = False, order_by: List = None, skip: int = None,
-               limit: int = None):
-        return Return(fields=fields, distinct=distinct, order_by=order_by, skip=skip, limit=limit, pre_cql=self)
+               limit: int = None, count: bool = False):
+        return Return(fields=fields, distinct=distinct, order_by=order_by, skip=skip, limit=limit, count=count,
+                      pre_cql=self)
 
 
 class Create(_CQL):
@@ -275,14 +329,24 @@ class Create(_CQL):
     def parse_nodes(self):
         nodes = self._params.get('nodes', [])
         parsed_nodes = []
+        params = {}
         for node in nodes:
-            parsed_nodes.append(node.cql)
-        return ', '.join(parsed_nodes)
+            parsed = node.cql
+            parsed_nodes.append(parsed['cql'])
+            params.update(parsed['params'])
+        return {'cql': ', '.join(parsed_nodes), 'params': params}
+
+    def parse_post_cql(self):
+        if self.post_cql:
+            parsed = parse_properties(self.post_cql, '=')
+            if parsed['properties']:
+                return {'cql': 'SET ' + parsed['cql'], 'params': parsed['params']}
+        return {'cql': '', 'params': {}}
 
     def Set(self, **new_properties):
         if self.post_cql:
             raise Exception('ERROR: cannot SET MERGE statement twice')
-        self.post_cql = 'SET ' + parse_properties(new_properties, '=')
+        self.post_cql = new_properties
         return self
 
     def Merge(self, node: Node):
@@ -292,8 +356,9 @@ class Create(_CQL):
         return Create(*nodes, pre_cql=self)
 
     def Return(self, fields: Union[List[str], str], distinct: bool = False, order_by: List = None, skip: int = None,
-               limit: int = None):
-        return Return(fields=fields, distinct=distinct, order_by=order_by, skip=skip, limit=limit, pre_cql=self)
+               limit: int = None, count: bool = False):
+        return Return(fields=fields, distinct=distinct, order_by=order_by, skip=skip, limit=limit, count=count,
+                      pre_cql=self)
 
 
 class Delete(_CQL):
@@ -309,7 +374,7 @@ class Delete(_CQL):
 
     def parse_results(self):
         results = self._params.get('results', [])
-        return ', '.join(results)
+        return {'cql': ', '.join(results), 'params': {}}
 
     def Merge(self, node: Node):
         return Merge(node, pre_cql=self)

@@ -178,7 +178,7 @@ class Neo4jApi(object):
                 _cql.With(limit=limit)
             return self
         else:
-            self._cql_stack.Return(fields=results, limit=limit)
+            self._cql_stack = self._cql_stack.Return(fields=results, limit=limit)
             return self.execute(t)
 
     def select_or_insert(self, node: Node, t: Transaction = None, compile: bool = False, results=None):
@@ -198,7 +198,7 @@ class Neo4jApi(object):
             return self
         else:
             if results:
-                self._cql_stack.Return(fields=results)
+                self._cql_stack = self._cql_stack.Return(fields=results)
             return self.execute(t)
 
     def update(self, t: Transaction = None, compile: bool = False, results: str = None, **new_properties):
@@ -213,7 +213,7 @@ class Neo4jApi(object):
             return self
         else:
             if results:
-                self._cql_stack.Return(fields=results)
+                self._cql_stack = self._cql_stack.Return(fields=results)
             return self.execute(t)
 
     def delete(self, detach=False, fields: Union[List, str] = None, t=None, compile=False,
@@ -228,7 +228,7 @@ class Neo4jApi(object):
             return self
         else:
             if results:
-                self._cql_stack.Return(fields=results)
+                self._cql_stack = self._cql_stack.Return(fields=results)
             return self.execute(t)
 
     def related(self, origin: Node, relation: Relation, target: Node, unique=True, t=None, compile=False,
@@ -244,7 +244,7 @@ class Neo4jApi(object):
             return self
         else:
             if results:
-                self._cql_stack.Return(fields=results)
+                self._cql_stack = self._cql_stack.Return(fields=results)
             return self.execute(t)
 
     def has_relation(self, origin: Node, relation: Relation, target: Node, direction=True, t=None,
@@ -255,7 +255,7 @@ class Neo4jApi(object):
             _cql = Match(origin.relationship_to(relation, target))
         else:
             _cql = Match(origin.relationship(relation, target))
-        _cql.Return(fields=results)
+        self._cql_stack = _cql.Return(fields=results)
         return self.execute(t)
 
     def traverse(self):
@@ -272,7 +272,7 @@ class Neo4jApi(object):
         _cql = Match(Node('origin', labels=origin_table, **origin_properties).relationship(
             Relation(labels=relation, depth=depth, **relation_properties),
             Node(results, labels=target_table, **target_properties)))
-        _cql.Return(fields=results)
+        self._cql_stack = _cql.Return(fields=results)
         return self.execute(t)
 
     def family(self):
@@ -289,12 +289,22 @@ class Neo4jApi(object):
         else:
             return self.execute(t)
 
+    def count(self, field: str, distinct: bool = True, compile=False, t=None):
+        _cql = self._cql_stack
+        if not _cql:
+            raise Exception(u'ERROR: Count results statement cannot be used as root statement')
+        self._cql_stack = _cql.Return(fields=field, distinct=distinct, count=True)
+        if compile:
+            return self
+        else:
+            return self.execute(t)
+
     @result_wrapper
     def execute(self, t=None):
         _conn = t if t else self._cli
         _cql = self._cql_stack.cql
         self._cql_stack = None
-        return _conn.run(_cql)
+        return _conn.run(_cql['cql'], _cql['params'])
 
     @property
     def query(self):
